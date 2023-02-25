@@ -1,1 +1,1 @@
-# goosip-glomers
+# Gossip Glommers
