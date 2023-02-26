@@ -11,7 +11,8 @@ import (
 func main() {
 	n := maelstrom.NewNode()
 
-	var messages []float64
+	topology := n.NodeIDs()
+	messages := map[float64]bool{}
 	var mu sync.Mutex
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
@@ -21,10 +22,20 @@ func main() {
 			return err
 		}
 
+		// Check if the message has already been seen
+		if ok := messages[body["message"].(float64)]; ok {
+			return nil
+		}
+
+		// Propagate received broadcast message to neighbouring nodes
+		for _, dest := range topology {
+			n.Send(dest, body)
+		}
+
 		// Update the message type to return back.
 		body["type"] = "broadcast_ok"
 		mu.Lock()
-		messages = append(messages, body["message"].(float64))
+		messages[body["message"].(float64)] = true
 		mu.Unlock()
 		delete(body, "message")
 
@@ -41,7 +52,11 @@ func main() {
 
 		// Update the message type to return back.
 		body["type"] = "read_ok"
-		body["messages"] = messages
+		keys := []float64{}
+		for k := range messages {
+			keys = append(keys, k)
+		}
+		body["messages"] = keys
 
 		// Echo the original message back with the updated message type.
 		return n.Reply(msg, body)
@@ -55,6 +70,11 @@ func main() {
 		}
 
 		// Update the message type to return back.
+		topology = []string{}
+		for _, neighbour := range body["topology"].(map[string]interface{})[n.ID()].([]interface{}) {
+			topology = append(topology, neighbour.(string))
+		}
+
 		delete(body, "topology")
 		body["type"] = "topology_ok"
 
