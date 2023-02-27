@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"strings"
@@ -10,16 +11,43 @@ import (
 )
 
 type BroadcastMessage struct {
+	Src     string  `json:src,omitempty`
 	Type    string  `json:type`
 	Message float64 `json:message`
+}
+
+type SrcMessage struct {
+	Src     string
+	Message BroadcastMessage
 }
 
 func main() {
 	n := maelstrom.NewNode()
 
+	ctx := context.Background()
+	messageQueue := make(chan SrcMessage, 3)
 	topology := n.NodeIDs()
 	messages := map[float64]bool{}
 	var mu sync.Mutex
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case newMsg := <-messageQueue:
+					// Propagate received broadcast message to neighbouring nodes
+					for _, dest := range topology {
+						if dest == newMsg.Src {
+							continue
+						}
+						n.Send(dest, newMsg.Message)
+					}
+				}
+			}
+		}()
+	}
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
 		// Unmarshal the message body as an loosely-typed map.
@@ -37,13 +65,7 @@ func main() {
 		messages[body.Message] = true
 		mu.Unlock()
 
-		// Propagate received broadcast message to neighbouring nodes
-		for _, dest := range topology {
-			if dest == msg.Src {
-				continue
-			}
-			n.Send(dest, body)
-		}
+		messageQueue <- SrcMessage{msg.Src, body}
 
 		// Echo the original message back with the updated message type.
 		if strings.HasPrefix(msg.Src, "n") {
@@ -93,4 +115,5 @@ func main() {
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
 	}
+	ctx.Done()
 }
