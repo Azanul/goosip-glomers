@@ -3,10 +3,16 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
+
+type BroadcastMessage struct {
+	Type    string  `json:type`
+	Message float64 `json:message`
+}
 
 func main() {
 	n := maelstrom.NewNode()
@@ -17,18 +23,18 @@ func main() {
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
 		// Unmarshal the message body as an loosely-typed map.
-		var body map[string]any
+		var body BroadcastMessage
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
 
 		// Check if the message has already been seen
 		mu.Lock()
-		if ok := messages[body["message"].(float64)]; ok {
+		if ok := messages[body.Message]; ok {
 			mu.Unlock()
 			return nil
 		}
-		messages[body["message"].(float64)] = true
+		messages[body.Message] = true
 		mu.Unlock()
 
 		// Propagate received broadcast message to neighbouring nodes
@@ -39,12 +45,11 @@ func main() {
 			n.Send(dest, body)
 		}
 
-		// Update the message type to return back.
-		body["type"] = "broadcast_ok"
-		delete(body, "message")
-
 		// Echo the original message back with the updated message type.
-		return n.Reply(msg, body)
+		if strings.HasPrefix(msg.Src, "n") {
+			return nil
+		}
+		return n.Reply(msg, map[string]string{"type": "broadcast_ok"})
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
@@ -81,11 +86,8 @@ func main() {
 			topology = append(topology, neighbour.(string))
 		}
 
-		delete(body, "topology")
-		body["type"] = "topology_ok"
-
 		// Echo the original message back with the updated message type.
-		return n.Reply(msg, body)
+		return n.Reply(msg, map[string]string{"type": "topology_ok"})
 	})
 
 	if err := n.Run(); err != nil {
