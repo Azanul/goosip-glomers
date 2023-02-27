@@ -28,7 +28,7 @@ func main() {
 	messageQueue := make(chan SrcMessage, 3)
 	topology := n.NodeIDs()
 	messages := map[float64]bool{}
-	var mu sync.Mutex
+	var mu sync.RWMutex
 
 	for i := 0; i < 3; i++ {
 		go func() {
@@ -57,11 +57,14 @@ func main() {
 		}
 
 		// Check if the message has already been seen
-		mu.Lock()
+		mu.RLock()
 		if ok := messages[body.Message]; ok {
-			mu.Unlock()
+			mu.RUnlock()
 			return nil
 		}
+		mu.RUnlock()
+
+		mu.Lock()
 		messages[body.Message] = true
 		mu.Unlock()
 
@@ -84,11 +87,11 @@ func main() {
 		// Update the message type to return back.
 		body["type"] = "read_ok"
 		keys := []float64{}
-		mu.Lock()
+		mu.RLock()
 		for k := range messages {
 			keys = append(keys, k)
 		}
-		mu.Unlock()
+		mu.RUnlock()
 		body["messages"] = keys
 
 		// Echo the original message back with the updated message type.
