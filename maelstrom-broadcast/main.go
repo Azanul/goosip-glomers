@@ -28,6 +28,8 @@ func main() {
 	messageQueue := make(chan SrcMessage, 3)
 	topology := n.NodeIDs()
 	messages := map[float64]bool{}
+	keys := []float64{}
+	resetKeys := false
 	var mu sync.RWMutex
 
 	for i := 0; i < 3; i++ {
@@ -67,6 +69,7 @@ func main() {
 		mu.Lock()
 		messages[body.Message] = true
 		mu.Unlock()
+		resetKeys = true
 
 		messageQueue <- SrcMessage{msg.Src, body}
 
@@ -85,17 +88,17 @@ func main() {
 		}
 
 		// Update the message type to return back.
-		body["type"] = "read_ok"
-		keys := []float64{}
-		mu.RLock()
-		for k := range messages {
-			keys = append(keys, k)
+		if resetKeys {
+			mu.RLock()
+			for k := range messages {
+				keys = append(keys, k)
+			}
+			mu.RUnlock()
+			resetKeys = false
 		}
-		mu.RUnlock()
-		body["messages"] = keys
 
 		// Echo the original message back with the updated message type.
-		return n.Reply(msg, body)
+		return n.Reply(msg, map[string]any{"type": "read_ok", "messages": keys})
 	})
 
 	n.Handle("topology", func(msg maelstrom.Message) error {
