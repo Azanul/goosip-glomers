@@ -23,20 +23,24 @@ func main() {
 		}
 
 		// Check if the message has already been seen
+		mu.Lock()
 		if ok := messages[body["message"].(float64)]; ok {
+			mu.Unlock()
 			return nil
 		}
+		messages[body["message"].(float64)] = true
+		mu.Unlock()
 
 		// Propagate received broadcast message to neighbouring nodes
 		for _, dest := range topology {
+			if dest == msg.Src {
+				continue
+			}
 			n.Send(dest, body)
 		}
 
 		// Update the message type to return back.
 		body["type"] = "broadcast_ok"
-		mu.Lock()
-		messages[body["message"].(float64)] = true
-		mu.Unlock()
 		delete(body, "message")
 
 		// Echo the original message back with the updated message type.
@@ -53,9 +57,11 @@ func main() {
 		// Update the message type to return back.
 		body["type"] = "read_ok"
 		keys := []float64{}
+		mu.Lock()
 		for k := range messages {
 			keys = append(keys, k)
 		}
+		mu.Unlock()
 		body["messages"] = keys
 
 		// Echo the original message back with the updated message type.
