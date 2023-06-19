@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
-	"sync"
+	"os"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -20,12 +21,23 @@ type OffsetsMessage struct {
 	Offsets map[string]int `json:"offsets"`
 }
 
+func tailKey(key string) string {
+	return fmt.Sprintf("tail_%s", key)
+}
+
+func entryKey(key string, offset int) string {
+	return fmt.Sprintf("entry_%s_%d", key, offset)
+}
+
+func commitKey(key string) string {
+	return fmt.Sprintf("commit_%s", key)
+}
+
 func main() {
 	n := maelstrom.NewNode()
 
-	ctx := context.Background()
-	kv := maelstrom.NewLinKV(n)
-	logs := AppendOnlyLog{kv: kv, commit_mu: sync.RWMutex{}, commited_offsets: map[string]int{}}
+	kv := maelstrom.NewSeqKV(n)
+	logs := AppendOnlyLog{ctx: context.TODO(), kv: kv}
 
 	n.Handle("send", func(msg maelstrom.Message) error {
 		var body SendMessage
@@ -33,7 +45,7 @@ func main() {
 			return err
 		}
 
-		tail, err := logs.Append(ctx, body.Key, body.Msg)
+		tail, err := logs.Append(body.Key, body.Msg)
 		if err != nil {
 			return err
 		}
@@ -47,11 +59,14 @@ func main() {
 			return err
 		}
 
-		msgs := map[string][][]int{}
-		for key, offset := range body.Offsets {
-			msgs[key] = [][]int{}
-			for i, polled := range logs.Poll(ctx, key, offset) {
-				msgs[key] = append(msgs[key], []int{offset + i, int(polled)})
+		msgs := map[string][][2]int{}
+		for key, startingOffset := range body.Offsets {
+			for offset := startingOffset; offset < startingOffset+3; offset++ {
+				polled := logs.Poll(key, offset)
+				if polled < 0 {
+					break
+				}
+				msgs[key] = [][2]int{{offset, polled}}
 			}
 		}
 
@@ -65,7 +80,9 @@ func main() {
 		}
 
 		for key, offset := range body.Offsets {
-			logs.CommitOffset(key, offset)
+			if err := logs.CommitOffset(key, offset); err != nil {
+				return err
+			}
 		}
 
 		return n.Reply(msg, map[string]any{"type": "commit_offsets_ok"})
@@ -92,60 +109,55 @@ func main() {
 }
 
 type AppendOnlyLog struct {
-	mu               sync.RWMutex
-	kv               *maelstrom.KV
-	commit_mu        sync.RWMutex
-	commited_offsets map[string]int
+	ctx context.Context
+	kv  *maelstrom.KV
 }
 
-func (aol *AppendOnlyLog) Append(ctx context.Context, key string, val float64) (int, error) {
-	aol.mu.Lock()
-	defer aol.mu.Unlock()
-	arr, _ := aol.kv.Read(ctx, key)
-	if arr == nil {
-		arr = []interface{}{}
-	}
-	values := sliceInterfaceToSliceInt(arr.([]interface{}))
-	values = append(values, val)
-
-	return len(values) - 1, aol.kv.Write(ctx, key, values)
-}
-
-func (aol *AppendOnlyLog) Poll(ctx context.Context, key string, offset int) []float64 {
-	aol.mu.Lock()
-	defer aol.mu.Unlock()
-	arr, err := aol.kv.Read(ctx, key)
+func (aol *AppendOnlyLog) Append(key string, val float64) (int, error) {
+	keyTail := tailKey(key)
+	offset, err := aol.kv.ReadInt(aol.ctx, keyTail)
 	if err != nil {
-		return []float64{}
+		rpcErr := err.(*maelstrom.RPCError)
+		if rpcErr.Code == maelstrom.KeyDoesNotExist {
+			offset = 0
+		} else {
+			return -1, err
+		}
+	} else {
+		offset++
 	}
 
-	values := sliceInterfaceToSliceInt(arr.([]interface{}))
-	return values[min(offset, len(values)):min(offset+3, len(values))]
+	for ; ; offset++ {
+		if err := aol.kv.CompareAndSwap(aol.ctx,
+			keyTail, offset-1, offset, true); err != nil {
+			fmt.Fprintf(os.Stderr, "cas retry: %v\n", err)
+			continue
+		}
+		break
+	}
+
+	return offset, aol.kv.Write(aol.ctx, entryKey(key, offset), val)
 }
 
-func (aol *AppendOnlyLog) CommitOffset(key string, offset int) {
-	aol.commit_mu.Lock()
-	defer aol.commit_mu.Unlock()
-	aol.commited_offsets[key] = offset
+func (aol *AppendOnlyLog) Poll(key string, offset int) int {
+	val, err := aol.kv.ReadInt(aol.ctx, entryKey(key, offset))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "poll read: %v\n", err)
+		return -1
+	}
+
+	return val
+}
+
+func (aol *AppendOnlyLog) CommitOffset(key string, offset int) error {
+	return aol.kv.Write(aol.ctx, commitKey(key), offset)
 }
 
 func (aol *AppendOnlyLog) GetCommitedOffset(key string) int {
-	aol.commit_mu.RLock()
-	defer aol.commit_mu.RUnlock()
-	return aol.commited_offsets[key]
-}
-
-func min(x, y int) int {
-	if x < y {
-		return x
+	v, err := aol.kv.ReadInt(aol.ctx, commitKey(key))
+	if err != nil {
+		return 0
 	}
-	return y
-}
 
-func sliceInterfaceToSliceInt(ip []interface{}) []float64 {
-	op := []float64{}
-	for _, v := range ip {
-		op = append(op, v.(float64))
-	}
-	return op
+	return v
 }
