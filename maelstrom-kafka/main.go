@@ -62,11 +62,14 @@ func main() {
 		msgs := map[string][][2]int{}
 		for key, startingOffset := range body.Offsets {
 			for offset := startingOffset; offset < startingOffset+3; offset++ {
-				polled := logs.Poll(key, offset)
-				if polled < 0 {
+				message, exists, err := logs.Poll(key, offset)
+				if err != nil {
+					return err
+				}
+				if !exists {
 					break
 				}
-				msgs[key] = [][2]int{{offset, polled}}
+				msgs[key] = append(msgs[key], [2]int{offset, message})
 			}
 		}
 
@@ -139,14 +142,16 @@ func (aol *AppendOnlyLog) Append(key string, val float64) (int, error) {
 	return offset, aol.kv.Write(aol.ctx, entryKey(key, offset), val)
 }
 
-func (aol *AppendOnlyLog) Poll(key string, offset int) int {
+func (aol *AppendOnlyLog) Poll(key string, offset int) (int, bool, error) {
 	val, err := aol.kv.ReadInt(aol.ctx, entryKey(key, offset))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "poll read: %v\n", err)
-		return -1
+		rpcErr := err.(*maelstrom.RPCError)
+		if rpcErr.Code == maelstrom.KeyDoesNotExist {
+			return 0, false, nil
+		}
+		return 0, false, err
 	}
-
-	return val
+	return val, true, nil
 }
 
 func (aol *AppendOnlyLog) CommitOffset(key string, offset int) error {
