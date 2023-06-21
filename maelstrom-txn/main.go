@@ -18,7 +18,8 @@ type TxnMessage struct {
 func main() {
 	n := maelstrom.NewNode()
 
-	kv := sync.Map{}
+	kv := map[string]interface{}{}
+	mu := sync.Mutex{}
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
 		var body TxnMessage
@@ -27,6 +28,7 @@ func main() {
 		}
 
 		txns := [][3]interface{}{}
+		mu.Lock()
 		for _, txn := range body.Transactions {
 			txnType := txn[0].(string)
 
@@ -35,15 +37,16 @@ func main() {
 			var v interface{}
 			switch txnType {
 			case "r":
-				v, _ = kv.Load(string(rune(targetKey)))
+				v = kv[string(rune(targetKey))]
 
 			case "w":
 				v = txn[2]
-				kv.Store(string(rune(targetKey)), v.(float64))
+				kv[string(rune(targetKey))] = v.(float64)
 			}
 			crr[2] = v
 			txns = append(txns, crr)
 		}
+		mu.Unlock()
 
 		go replicate(txns, n)
 
@@ -56,14 +59,17 @@ func main() {
 			return err
 		}
 
+		mu.Lock()
 		for _, txn := range body.Transactions {
 			txnType := txn[0].(string)
 			targetKey := txn[1].(float64)
 			if txnType == "w" {
-				kv.Store(string(rune(targetKey)), txn[2].(float64))
+				kv[string(rune(targetKey))] = txn[2].(float64)
 			}
 
 		}
+		mu.Unlock()
+
 		return n.Reply(msg, map[string]any{"type": "sync_ok"})
 	})
 
